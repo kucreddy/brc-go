@@ -17,8 +17,9 @@ type CityStats struct {
 	Count int
 }
 
-var filePath = "../sample-10M.txt"
-var processors = 4
+var filePath = "../measurements-1000000000.txt"
+var processors = 16
+var chunkSize = 4 * 1024 * 1024 // size of each chunk to read in bytes
 
 func main() {
 	resultChannels := make([]chan map[string]*CityStats, processors)
@@ -46,7 +47,7 @@ func main() {
 		start := nextStart
 		end := start + partitionSize
 		if i == processors-1 {
-			end = fileStat.Size()
+			end = fileStat.Size() - 1
 		} else {
 			currChar = make([]byte, 1)
 			for {
@@ -70,7 +71,7 @@ func main() {
 
 			fmt.Println("go routine started for range:", start, "to", end)
 
-			// file, err := os.Open(FilePath)
+			// file, err := os.Open(filePath)
 			// if err != nil {
 			// 	fmt.Println("Error opening file in goroutine:", err)
 			// 	return
@@ -82,40 +83,43 @@ func main() {
 
 			currStart := start
 			for currStart < end {
-				line, nextStart, err := readSingleLine(file, currStart)
+				lines, nextStart, err := readLines(file, currStart, end)
 				if err != nil {
-					fmt.Println("Error reading line:", err)
+					fmt.Println("Error reading lines:", err)
 					return
 				}
-				counter++
 				currStart = nextStart
-				parts := strings.Split(line, ";")
-				cityName := parts[0]
-				raw, err := strconv.ParseFloat(parts[1], 32)
-				if err != nil {
-					fmt.Println("Error parsing measurement:", err)
-					return
+				for _, line := range lines {
+					counter++
+					parts := strings.Split(line, ";")
+					cityName := parts[0]
+					raw, err := strconv.ParseFloat(parts[1], 32)
+					if err != nil {
+						fmt.Println("Error parsing measurement:", err)
+						return
+					}
+					measurement := float32(raw)
+					if stats, exists := res[cityName]; exists {
+						stats.Count++
+						stats.Sum += measurement
+						if measurement < stats.Min {
+							stats.Min = measurement
+						}
+						if measurement > stats.Max {
+							stats.Max = measurement
+						}
+					} else {
+						res[cityName] = &CityStats{
+							Name:  cityName,
+							Min:   measurement,
+							Mean:  measurement,
+							Max:   measurement,
+							Sum:   measurement,
+							Count: 1,
+						}
+					}
 				}
-				measurement := float32(raw)
-				if stats, exists := res[cityName]; exists {
-					stats.Count++
-					stats.Sum += measurement
-					if measurement < stats.Min {
-						stats.Min = measurement
-					}
-					if measurement > stats.Max {
-						stats.Max = measurement
-					}
-				} else {
-					res[cityName] = &CityStats{
-						Name:  cityName,
-						Min:   measurement,
-						Mean:  measurement,
-						Max:   measurement,
-						Sum:   measurement,
-						Count: 1,
-					}
-				}
+				currStart = nextStart
 			}
 
 			resultChannel <- res
@@ -124,10 +128,7 @@ func main() {
 		}(start, end, resultChannels[i], counterChannels[i])
 
 	}
-	// fmt.Println("All go routines started, waiting for them to finish...")
-	// waitGroup.Wait()
 
-	// merge the results into citiesMap
 	for _, resultChannel := range resultChannels {
 		result := <-resultChannel
 		for cityName, stats := range result {
@@ -188,4 +189,39 @@ func readSingleLine(file *os.File, start int64) (line string, nextStart int64, e
 	line = string(bytes)
 	nextStart = start + 1 // move to the next character after the newline
 	return line, nextStart, nil
+}
+
+func readLines(file *os.File, currStart, partitionEnd int64) (lines []string, nextStart int64, err error) {
+	// read chunk size bytes, and seek back to the last newline
+	// if currStart + chunkSize > partitionEnd -> read only till partitionEnd
+
+	bufferSize := chunkSize
+	if currStart+int64(chunkSize) > partitionEnd {
+		bufferSize = int(partitionEnd-currStart) + 1
+	}
+	bytes := make([]byte, bufferSize)
+	readSize, err := file.ReadAt(bytes, currStart)
+	if err != nil {
+		fmt.Println("Error reading file:", err)
+		return nil, currStart, err
+	}
+	if readSize != int(bufferSize) {
+		fmt.Printf("Warning: read size %d does not match expected size %d\n", readSize, bufferSize)
+		return nil, currStart, fmt.Errorf("read size %d does not match expected size %d", readSize, bufferSize)
+	}
+
+	// from the last byte, seek back to the last newline
+	for i := readSize - 1; i >= 0; i-- {
+		if bytes[i] == '\n' {
+			nextStart = currStart + int64(i+1)
+			bytes = bytes[:i] // trim the bytes to only include up to the last newline
+			break
+		}
+		// for our dataset, we won't reach the start of the chunk without finding a newline
+	}
+	lines = strings.Split(string(bytes), "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1] // remove the last empty line if it exists
+	}
+	return lines, nextStart, nil
 }
