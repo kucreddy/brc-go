@@ -63,18 +63,21 @@ func main() {
 		if i == partitioinCount-1 {
 			end = fileStat.Size() - 1
 		} else {
-			currChar = make([]byte, 1)
+			currChar = make([]byte, 200) // any cityname should reasonably fit in this
+			_, err := file.ReadAt(currChar, end)
+			if err != nil {
+				fmt.Println("Error reading file:", err)
+				return
+			}
+			i := 0
 			for {
-				_, err := file.ReadAt(currChar, end)
-				if err != nil {
-					fmt.Println("Error reading file:", err)
-					return
-				}
-				if currChar[0] == '\n' {
+				c := currChar[i]
+				if c == '\n' {
 					break
 				}
-				end++
+				i++
 			}
+			end += int64(i)
 		}
 		nextStart = end + 1
 		resultChannels[i] = make(chan *partitionResult)
